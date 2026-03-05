@@ -12,61 +12,123 @@ import java.util.Random;
 
 public class MctsBot implements IBot {
 
-    private static final String BOT_NAME = "MCTS Bot (v0.3)";
+    private static final String BOT_NAME = "MCTS Bot (v1.0 - Terminator)";
     private final Random random = new Random();
+    private final int MAX_TIME_MS = 900;
 
     private static class Node {
-        IGameState state;
         Node parent;
         IMove move;
         List<Node> children;
         int visits;
         double wins;
+        List<IMove> untriedMoves;
+        boolean isMyTurn;
 
-        public Node(IGameState state, Node parent, IMove move) {
-            this.state = state;
+        public Node(Node parent, IMove move, boolean isMyTurn, List<IMove> availableMoves) {
             this.parent = parent;
             this.move = move;
+            this.isMyTurn = isMyTurn;
             this.children = new ArrayList<>();
             this.visits = 0;
             this.wins = 0;
+            this.untriedMoves = new ArrayList<>(availableMoves);
         }
     }
 
     @Override
     public IMove doMove(IGameState state) {
-        List<IMove> availableMoves = state.getField().getAvailableMoves();
-        if (availableMoves.isEmpty()) return null;
+        long startTime = System.currentTimeMillis();
+        long endTime = startTime + MAX_TIME_MS;
 
-        int result = simulateRandomPlayout(state);
+        int myPlayerId = state.getMoveNumber() % 2;
 
-        int randomIndex = random.nextInt(availableMoves.size());
-        return availableMoves.get(randomIndex);
+        List<IMove> initialMoves = state.getField().getAvailableMoves();
+        if (initialMoves.isEmpty()) return null;
+        if (initialMoves.size() == 1) return initialMoves.get(0);
+
+        Node root = new Node(null, null, true, initialMoves);
+
+        while (System.currentTimeMillis() < endTime) {
+            Node node = root;
+            GameSimulator simulator = createSimulator(state);
+
+            while (node.untriedMoves.isEmpty() && !node.children.isEmpty()) {
+                node = selectBestUCTChild(node);
+                simulator.updateGame(node.move);
+            }
+
+            if (!node.untriedMoves.isEmpty() && simulator.getGameOver() == GameOverState.Active) {
+                IMove moveToExpand = node.untriedMoves.remove(random.nextInt(node.untriedMoves.size()));
+                simulator.updateGame(moveToExpand);
+
+                boolean childIsMyTurn = !node.isMyTurn;
+                List<IMove> newAvailableMoves = simulator.getCurrentState().getField().getAvailableMoves();
+
+                Node child = new Node(node, moveToExpand, childIsMyTurn, newAvailableMoves);
+                node.children.add(child);
+                node = child;
+            }
+
+            while (simulator.getGameOver() == GameOverState.Active) {
+                List<IMove> moves = simulator.getCurrentState().getField().getAvailableMoves();
+                if (moves.isEmpty()) break;
+                simulator.updateGame(moves.get(random.nextInt(moves.size())));
+            }
+
+            double result = 0.0;
+            if (simulator.getGameOver() == GameOverState.Win) {
+                int winner = (simulator.currentPlayer == 0) ? 1 : 0;
+                result = (winner == myPlayerId) ? 1.0 : 0.0;
+            } else if (simulator.getGameOver() == GameOverState.Tie) {
+                result = 0.5;
+            }
+
+            while (node != null) {
+                node.visits++;
+                node.wins += result;
+                node = node.parent;
+            }
+        }
+
+        Node bestChild = null;
+        int maxVisits = -1;
+        for (Node child : root.children) {
+            if (child.visits > maxVisits) {
+                maxVisits = child.visits;
+                bestChild = child;
+            }
+        }
+
+        return bestChild != null ? bestChild.move : initialMoves.get(0);
+    }
+
+    private Node selectBestUCTChild(Node node) {
+        Node bestChild = null;
+        double bestUCT = -Double.MAX_VALUE;
+
+        for (Node child : node.children) {
+            if (child.visits == 0) continue;
+
+            double winRate = child.wins / (double) child.visits;
+            if (!node.isMyTurn) {
+                winRate = 1.0 - winRate;
+            }
+
+            double exploration = Math.sqrt(2.0 * Math.log(node.visits) / (double) child.visits);
+            double uctValue = winRate + exploration;
+
+            if (uctValue > bestUCT) {
+                bestUCT = uctValue;
+                bestChild = child;
+            }
+        }
+        return bestChild;
     }
 
     @Override
     public String getBotName() {
         return BOT_NAME;
-    }
-
-    private int simulateRandomPlayout(IGameState initialState) {
-        GameSimulator simulator = createSimulator(initialState);
-        int myPlayerId = initialState.getMoveNumber() % 2;
-
-        while (simulator.getGameOver() == GameOverState.Active) {
-            List<IMove> moves = simulator.getCurrentState().getField().getAvailableMoves();
-            if (moves.isEmpty()) break;
-            IMove randomMove = moves.get(random.nextInt(moves.size()));
-            simulator.updateGame(randomMove);
-        }
-
-        if (simulator.getGameOver() == GameOverState.Tie) {
-            return 0;
-        } else if (simulator.getGameOver() == GameOverState.Win) {
-            int winnerId = (simulator.currentPlayer == 0) ? 1 : 0;
-            return (winnerId == myPlayerId) ? 1 : -1;
-        }
-        return 0;
     }
 
     private GameSimulator createSimulator(IGameState state) {
@@ -75,6 +137,7 @@ public class MctsBot implements IBot {
         simulator.setCurrentPlayer(state.getMoveNumber() % 2);
         simulator.getCurrentState().setRoundNumber(state.getRoundNumber());
         simulator.getCurrentState().setMoveNumber(state.getMoveNumber());
+
         simulator.getCurrentState().getField().setBoard(state.getField().getBoard());
         simulator.getCurrentState().getField().setMacroboard(state.getField().getMacroboard());
         return simulator;
